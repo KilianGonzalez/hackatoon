@@ -1,8 +1,10 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { GraduationCap, Users, BookOpen, Building2 } from 'lucide-react'
+import { GraduationCap, Users, BookOpen, Building2, Loader2 } from 'lucide-react'
+import { createClient } from '@/lib/supabase/client'
 
 type UserType = 'student' | 'family' | 'company' | null
 
@@ -108,6 +110,7 @@ function UserTypeCard({
 }
 
 function RegisterForm({ type, onBack }: { type: UserType; onBack: () => void }) {
+  const router = useRouter()
   const [formData, setFormData] = useState({
     firstName: '',
     lastName: '',
@@ -116,6 +119,7 @@ function RegisterForm({ type, onBack }: { type: UserType; onBack: () => void }) 
     confirmPassword: '',
     invitationCode: '',
     companyName: '',
+    currentGrade: '4º ESO',
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -141,13 +145,134 @@ function RegisterForm({ type, onBack }: { type: UserType; onBack: () => void }) 
     }
 
     setLoading(true)
-    
-    // TODO: Implement registration logic with Supabase
-    // For now, just show a message
-    setTimeout(() => {
+    const supabase = createClient()
+
+    try {
+      // Para alumnos, validar código de invitación primero
+      let invitation = null
+      if (type === 'student') {
+        const { data: inv, error: invError } = await supabase
+          .from('invitations')
+          .select('*')
+          .eq('code', formData.invitationCode.toUpperCase())
+          .eq('status', 'pending')
+          .single()
+
+        if (invError || !inv) {
+          setError('Código de invitación inválido o expirado')
+          setLoading(false)
+          return
+        }
+
+        if (new Date(inv.expires_at) < new Date()) {
+          setError('El código de invitación ha expirado')
+          setLoading(false)
+          return
+        }
+
+        invitation = inv
+      }
+
+      // Crear usuario en Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: formData.email,
+        password: formData.password,
+        options: {
+          data: {
+            first_name: formData.firstName,
+            last_name: formData.lastName,
+          }
+        }
+      })
+
+      if (authError) {
+        setError(authError.message)
+        setLoading(false)
+        return
+      }
+
+      if (!authData.user) {
+        setError('Error al crear el usuario')
+        setLoading(false)
+        return
+      }
+
+      const userId = authData.user.id
+
+      // Crear perfil según el tipo
+      const profileData: any = {
+        id: userId,
+        role: type,
+        first_name: formData.firstName,
+        last_name: formData.lastName,
+        email: formData.email,
+        is_active: true,
+        email_verified: true,
+        onboarding_completed: true,
+      }
+
+      if (type === 'student' && invitation) {
+        profileData.center_id = invitation.center_id
+      }
+
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .insert(profileData)
+
+      if (profileError) {
+        console.error('Profile error:', profileError)
+        setError('Error al crear el perfil: ' + profileError.message)
+        setLoading(false)
+        return
+      }
+
+      // Acciones específicas por tipo
+      if (type === 'student' && invitation) {
+        // Crear registro de estudiante
+        const { error: studentError } = await supabase
+          .from('students')
+          .insert({
+            profile_id: userId,
+            center_id: invitation.center_id,
+            current_grade: formData.currentGrade,
+            academic_year: '2024-2025',
+            interests: [],
+          })
+
+        if (studentError) {
+          console.error('Student error:', studentError)
+        }
+
+        // Marcar invitación como usada
+        await supabase
+          .from('invitations')
+          .update({ status: 'accepted', used_by: userId, used_at: new Date().toISOString() })
+          .eq('id', invitation.id)
+      }
+
+      if (type === 'company') {
+        // Crear registro de empresa
+        const { error: companyError } = await supabase
+          .from('companies')
+          .insert({
+            profile_id: userId,
+            company_name: formData.companyName,
+            status: 'pending',
+          })
+
+        if (companyError) {
+          console.error('Company error:', companyError)
+        }
+      }
+
+      // Redirigir al dashboard
+      router.push('/app')
+      router.refresh()
+
+    } catch (err: any) {
+      setError(err.message || 'Error desconocido')
       setLoading(false)
-      alert('Registro en desarrollo. Por favor, contacta con el administrador.')
-    }, 1000)
+    }
   }
 
   return (
@@ -171,22 +296,43 @@ function RegisterForm({ type, onBack }: { type: UserType; onBack: () => void }) 
         )}
 
         {type === 'student' && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Código de invitación *
-            </label>
-            <input
-              type="text"
-              value={formData.invitationCode}
-              onChange={(e) => setFormData({ ...formData, invitationCode: e.target.value })}
-              required
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="Introduce el código de tu centro"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Solicita el código a tu tutor/orientador
-            </p>
-          </div>
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Código de invitación *
+              </label>
+              <input
+                type="text"
+                value={formData.invitationCode}
+                onChange={(e) => setFormData({ ...formData, invitationCode: e.target.value.toUpperCase() })}
+                required
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase"
+                placeholder="Introduce el código de tu centro"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Solicita el código a tu tutor/orientador
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Curso actual *
+              </label>
+              <select
+                value={formData.currentGrade}
+                onChange={(e) => setFormData({ ...formData, currentGrade: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="3º ESO">3º ESO</option>
+                <option value="4º ESO">4º ESO</option>
+                <option value="1º Bachillerato">1º Bachillerato</option>
+                <option value="2º Bachillerato">2º Bachillerato</option>
+                <option value="1º FP Básica">1º FP Básica</option>
+                <option value="2º FP Básica">2º FP Básica</option>
+                <option value="1º FP Medio">1º FP Grado Medio</option>
+                <option value="2º FP Medio">2º FP Grado Medio</option>
+              </select>
+            </div>
+          </>
         )}
 
         {type === 'company' && (
